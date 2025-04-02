@@ -1,0 +1,37 @@
+name: Build, Load Test, and Deploy
+
+on: [workflow_dispatch]
+
+permissions:
+  id-token: write # Require write permission to Fetch an OIDC token.
+  contents: read  # This is required for actions/checkout
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run build job
+        uses: ./.github/workflows/deploy.yml
+        with:
+          run: build
+
+  loadtest:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Run load test job
+        uses: ./.github/workflows/loadtest.yml
+        with:
+          run: loadtest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: loadtest
+
+    steps:
+      - name: Run deploy job
+        uses: ./.github/workflows/deploy.yml
+        with:
+          run: deploy
