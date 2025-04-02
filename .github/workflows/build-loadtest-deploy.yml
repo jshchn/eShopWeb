@@ -6,32 +6,104 @@ permissions:
   id-token: write # Require write permission to Fetch an OIDC token.
   contents: read  # This is required for actions/checkout
 
+env:
+  # For AZURE_WEBAPP_NAME enter just the name, not the full URL.
+  AZURE_WEBAPP_NAME: az2006appjocha
+  RESOURCE_GROUP: az2006-rg
+  LOAD_TEST_RESOURCE: az2006loadtest
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Run build job
-        uses: ./.github/workflows/deploy.yml
+      # Setup .NET
+      - uses: actions/checkout@v4
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v4
         with:
-          run: build
+          dotnet-version: '8.0.x'
+
+      # Build/publish the .NET project
+      - name: Install dependencies
+        run: dotnet restore
+      - name: Build
+        run: dotnet build ./az2006webapp.sln --configuration Release
+      - name: Publish
+        run: |
+          dotnet publish ./az2006webapp.csproj -c Release -o ${{env.DOTNET_ROOT}}/myapp
+          cd ${{env.DOTNET_ROOT}}/myapp
+          zip -r ../app.zip .
+
+      # Upload the published website code artifacts
+      - name: Upload artifact for load test and deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: .net-app
+          path: ${{env.DOTNET_ROOT}}/app.zip
 
   loadtest:
     runs-on: ubuntu-latest
     needs: build
 
     steps:
-      - name: Run load test job
-        uses: ./.github/workflows/loadtest.yml
+      - uses: actions/checkout@v4
+
+      # Login in your Azure subscription using OpenID Connect (credentials stored as GitHub secrets in repo)
+      - name: Azure Login
+        uses: azure/login@v2
         with:
-          run: loadtest
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Run the load test
+      - name: Azure Load Testing
+        uses: azure/load-testing@v1
+        with:
+          loadTestConfigFile: 'config.yaml'
+          loadTestResource: ${{ env.LOAD_TEST_RESOURCE }}
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          env: |
+            [
+              {
+              "name": "webapp",
+              "value": "${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net"
+              }
+            ]
+
+      # Upload the load test results
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadTestResults
+          path: ${{github.workspace}}/loadTest
 
   deploy:
     runs-on: ubuntu-latest
     needs: loadtest
 
     steps:
-      - name: Run deploy job
-        uses: ./.github/workflows/deploy.yml
+      - uses: actions/checkout@v4
+
+      # Download the published files created in the build job
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
         with:
-          run: deploy
+          name: .net-app
+          path: .net-app
+
+      # Login in your Azure subscription using OpenID Connect (credentials stored as GitHub secrets in repo)
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Publish website to Azure App Service using CLI (WebApp)
+      - name: Publish Website to WebApp
+        uses: Azure/cli@v2
+        with:
+          inlineScript: |
+            az webapp deploy --name ${{ env.AZURE_WEBAPP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --src-path .net-app/app.zip --type zip
